@@ -1,2 +1,2 @@
-### ccBattlestaves
-It crafts battlestaves
+### ccMageArena
+Mage arena things
