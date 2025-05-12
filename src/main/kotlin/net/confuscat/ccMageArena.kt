@@ -1,19 +1,20 @@
 package net.confuscat
 
-import net.botwithus.api.game.hud.inventories.Backpack
-import net.botwithus.api.game.hud.inventories.Bank
 import net.botwithus.internal.scripts.ScriptDefinition
-import net.botwithus.rs3.game.*
-import net.botwithus.rs3.game.Client.getLocalPlayer
-import net.botwithus.rs3.game.hud.interfaces.Interfaces
-import net.botwithus.rs3.game.minimenu.MiniMenu
-import net.botwithus.rs3.game.minimenu.actions.ComponentAction
-import net.botwithus.rs3.game.movement.Movement
-import net.botwithus.rs3.game.movement.NavPath
-import net.botwithus.rs3.game.movement.TraverseEvent
+import net.botwithus.rs3.game.Client
+import net.botwithus.rs3.game.Area
+import net.botwithus.rs3.game.Coordinate
+import net.botwithus.rs3.events.impl.ChatMessageEvent
+import net.botwithus.rs3.events.impl.InventoryUpdateEvent
+import net.botwithus.rs3.game.Inventory
+import net.botwithus.rs3.game.Item
+import net.botwithus.rs3.game.actionbar.ActionBar
+import net.botwithus.rs3.game.inventories.Backpack
+import net.botwithus.rs3.game.queries.builders.ItemQuery
+import net.botwithus.rs3.game.queries.builders.components.ComponentQuery
+import net.botwithus.rs3.game.queries.builders.items.InventoryItemQuery
 import net.botwithus.rs3.game.queries.builders.objects.SceneObjectQuery
 import net.botwithus.rs3.game.scene.entities.characters.player.LocalPlayer
-import net.botwithus.rs3.game.scene.entities.`object`.SceneObject
 import net.botwithus.rs3.script.Execution
 import net.botwithus.rs3.script.LoopingScript
 import net.botwithus.rs3.script.config.ScriptConfig
@@ -28,33 +29,89 @@ class ccMageArena(
 
     private val random: Random = Random()
     var botState: BotState = BotState.IDLE
-    var bankPreset: Int = 10
-    val FORTBANK = 125115
+    var lastChatMessage: String? = null
+    var lastNewItem: Item? = null
 
-    var usePortable: Boolean = false
-    var orbTypes = arrayOf("Water", "Earth", "Fire", "Air") //Water, fire, earth, air = 591, 569, 575, 573
-    var selectedOrb: Int = 0
+    //Cupboard states
+    val HIDDEN = 1
+    val UNHIDDEN = 0
+    var currentCupboard = 0
 
+    //Interface IDs
+    val INTERFACE_ROTATION = 194
+    val INTERFACE_POINTS = 9
+    val INTERFACE_BOOTS = 10
+    val INTERFACE_SHIELD = 11
+    val INTERFACE_HELM = 12
+    val INTERFACE_GEM = 13
+    val INTERFACE_SWORD = 14
+
+    //Alchable Item IDs
+    val alchableSword = 6897
+    val alchableGem = 6896
+    val alchableHelm = 6895
+    val alchableShield = 6894
+    val alchableBoots = 6893
+
+    //item names based on id, used to determine what we want to listen in chat for
+    private val itemNames = hashMapOf<Int, String> (
+        alchableBoots to "Leather boots",
+        alchableShield to "Adamant kiteshield",
+        alchableHelm to  "Adamant helm",
+        alchableGem to "Emerald",
+        alchableSword to "Rune longsword"
+    )
+    //Telekenetic Area
+    private var alchArea: Area = Area.Rectangular(Coordinate(3348, 9657, 2), Coordinate(3380, 9615, 2))
+
+    private val itemList = listOf(alchableSword, alchableGem, alchableHelm, alchableShield, alchableBoots)
+
+    private val cupboardIds: Array<IntArray> = arrayOf(
+        intArrayOf(10783, 10784), //NW
+        intArrayOf(10785, 10786), //West Center North
+        intArrayOf(10787, 10788), //West Center South
+        intArrayOf(10789, 10790), //SW
+        intArrayOf(10791, 10792), //NE
+        intArrayOf(10793, 10794), //East Center North
+        intArrayOf(10795, 10796), //East Center South
+        intArrayOf(10797, 10798)  //SE
+    )
 
     enum class BotState {
         STARTING,
         IDLE,
-        SKILLING,
-        BANKING,
-        MOVING_TO_FORT,
-        PROCESSING
+        SEARCH_AND_ALCH
     }
 
     override fun initialize(): Boolean {
         super.initialize()
         // Set the script graphics context to our custom one
         this.sgc = ccMageArenaGraphicsContext(this, console)
+
+        if (lastChatMessage == null) {
+            subscribe(ChatMessageEvent::class.java) { event ->
+                lastChatMessage = event.message
+            }
+        }
+        subscribe(InventoryUpdateEvent::class.java) { event ->
+            val newItem = event.newItem
+            val oldItem = event.oldItem
+
+            if (newItem == null) return@subscribe             // skip removals
+            if (newItem.id == 995 || newItem.id == 8890) return@subscribe // skip coins
+
+            // Only set if it's a new item or item changed
+            if (oldItem == null || oldItem.id != newItem.id) {
+                lastNewItem = newItem
+                println("New cupboard item: ${newItem.name} (${newItem.id})")
+            }
+        }
         return true
     }
 
     override fun onLoop() {
         println("STATUS: $botState")
-        println(selectedOrb)
+
         val player = Client.getLocalPlayer()
         if (Client.getGameState() != Client.GameState.LOGGED_IN || player == null || botState == BotState.IDLE) {
             Execution.delay(random.nextLong(2500,5500))
@@ -65,137 +122,105 @@ class ccMageArena(
                 Execution.delay(startScript(player))
                 return
             }
-            BotState.SKILLING -> {
-                Execution.delay(handleSkilling())
-                return
-            }
-            BotState.BANKING -> {
-                Execution.delay(handleBanking())
-                return
-            }
-            BotState.MOVING_TO_FORT -> {
-                Execution.delay(moveToFort())
-                return
-            }
             BotState.IDLE -> {
                 println("STATUS: IDLE")
                 Execution.delay(random.nextLong(1500,5000))
             }
-            BotState.PROCESSING -> {
-                println("STATUS: PROCESSING")
-                Execution.delay(craftStaff())
+            BotState.SEARCH_AND_ALCH -> {
+                Execution.delay(searchingAndAlching(player))
                 return
             }
         }
         return
     }
 
+    private fun getItemValues(): HashMap<Int, Int?> {
+        val bootsPrice = ComponentQuery.newQuery(INTERFACE_ROTATION).componentIndex(INTERFACE_BOOTS).results().first()?.text?.toInt()
+        val shieldPrice = ComponentQuery.newQuery(INTERFACE_ROTATION).componentIndex(INTERFACE_SHIELD).results().first()?.text?.toInt()
+        val helmPrice = ComponentQuery.newQuery(INTERFACE_ROTATION).componentIndex(INTERFACE_HELM).results().first()?.text?.toInt()
+        val gemPrice = ComponentQuery.newQuery(INTERFACE_ROTATION).componentIndex(INTERFACE_GEM).results().first()?.text?.toInt()
+        val swordPrice = ComponentQuery.newQuery(INTERFACE_ROTATION).componentIndex(INTERFACE_SWORD).results().first()?.text?.toInt()
+
+        println("Boots price: $bootsPrice")
+        println("Shield price: $shieldPrice")
+        println("Helm price: $helmPrice")
+        println("Gem price: $gemPrice")
+        println("Sword price: $swordPrice")
+
+        val values: HashMap<Int, Int?> = HashMap<Int, Int?> ()
+        values[alchableBoots] = bootsPrice
+        values[alchableShield] = shieldPrice
+        values[alchableHelm] = helmPrice
+        values[alchableGem] = gemPrice
+        values[alchableSword] = swordPrice
+
+        return values
+    }
+
     private fun startScript(player: LocalPlayer): Long {
-        val fortArea: Area = Area.Rectangular(Coordinate(3276, 3561, 0), Coordinate(3284, 3549, 0))
-        if (!fortArea.contains(player.coordinate)) {
-            println("Starting moving state")
-            botState = BotState.MOVING_TO_FORT
+        /* If player is in area then set state to NEW_CUPBOARD */
+        if (alchArea.contains(player.coordinate)) {
+            println("INFO: Starting Script. Finding new Cupboard")
+            botState = BotState.SEARCH_AND_ALCH
         } else {
-            println("Banking")
-            botState = BotState.BANKING
+            println("INFO: Not in Telekentic Area, manually move there")
         }
-        return random.nextLong(1500, 3500)
+
+        return random.nextLong(1000, 1500)
     }
 
-    private fun moveToFort(): Long {
-        println("Moving to Fort Forinthry")
+    private fun searchingAndAlching(player: LocalPlayer): Long {
 
-        val fortArea: Area = Area.Rectangular(Coordinate(3278, 3556, 0), Coordinate(3282, 3553, 0))
-        val coords: Coordinate = fortArea.randomWalkableCoordinate
-        val path = NavPath.resolve(coords).interrupt { event: TraverseEvent? ->
-                    coords.isReachable && coords.distanceTo(
-                        getLocalPlayer()!!.coordinate
-                    ) <= 2
-                }
-        val moveState: TraverseEvent.State = Movement.traverse(path)
+        //grabs values and gets the id and name of the best one (30 coins)
+        val itemValues = getItemValues()
+        val bestItemId = itemValues.entries.first {it.value == 30}.key
+        val bestItemName = itemNames[bestItemId]
 
-        if (moveState == TraverseEvent.State.FINISHED) {
-            println("Traversal success -> banking")
-            botState = BotState.BANKING
-        } else {
-            println("Traversal Failed -> retrying")
-            botState = BotState.MOVING_TO_FORT
+        println("Best Item: $bestItemName")
+        println("Last Msg: $lastChatMessage")
+        println("LastNewItem: ${lastNewItem?.name};${lastNewItem?.id}")
+
+        if (player.isMoving || player.animationId != -1) {
+            return random.nextLong(1500, 2000)
         }
-        return random.nextLong(1500, 3500)
-    }
 
-    private fun handleBanking(): Long {
-        if (Bank.isOpen()) {
-            println("Loading preset $bankPreset")
-            Bank.loadPreset(bankPreset)
-            Execution.delayWhile(1500){
-                Bank.isOpen()
-            }
-            botState = BotState.SKILLING
-        } else {
-            Bank.open()
-            Execution.delayUntil(1500){
-                Bank.isOpen()
-            }
+        val newItemIndex = itemList.indexOf(lastNewItem?.id)
+        val bestItemIndex = itemList.indexOf(bestItemId)
 
+        if (newItemIndex != -1 && bestItemIndex != -1 && newItemIndex != bestItemIndex) {
+            //change currentCupboard
+            val newItemPositionOffset = newItemIndex - bestItemIndex
+            println("Best Item Offset: $newItemPositionOffset")
+            currentCupboard = (currentCupboard + newItemPositionOffset).mod(cupboardIds.size)
+            println("CurrentCupboard: $currentCupboard")
         }
-        return random.nextLong(1500, 3000)
-    }
 
-    private fun craftStaff(): Long{
-        Execution.delayUntil(
-            15000
-        ) { Interfaces.isOpen(1370) }
-        if (Interfaces.isOpen(1370)) {
+        Execution.delayWhile(1200) {
+            Backpack.interact(bestItemId, "Low alch")
+        }
 
-            MiniMenu.interact(ComponentAction.DIALOGUE.type, 0, -1, 89784350)
-            botState = BotState.PROCESSING
+        //cupboards are hidden once opened so we want to get whichever isnt hidden UNHIDDEN/HIDDEN = array index when default cupboard
+        //is in the given state
+        val cupboard = listOf(
+            SceneObjectQuery.newQuery().id(cupboardIds[currentCupboard][UNHIDDEN]).option("Search").results().first(),
+            SceneObjectQuery.newQuery().id(cupboardIds[currentCupboard][HIDDEN]).option("Search").results().first()
+        ).first { it != null && !it.isHidden }
 
-            Execution.delayUntil(
-                15000
-            ) { Interfaces.isOpen(1251) }
+        if (cupboard?.interact("Search") == true) {
+            val initialMessage = lastChatMessage
 
-            while (Interfaces.isOpen(1251)){
-                Execution.delay(1000)
+            Execution.delayUntil(500) {
+                lastChatMessage != null && lastChatMessage != initialMessage
             }
 
-            println("Finished crafting, banking now")
-            botState = BotState.BANKING
+            //If cupboard is empty we go to next cupboard, if out of bounds on the array loop back to first cupboard
+            if (lastChatMessage?.contains("empty") == true) {
+                currentCupboard = (currentCupboard + 1) % cupboardIds.size
+            }
+            lastChatMessage = null
+
         }
-        return random.nextLong(1500, 3000)
+        return random.nextLong(1500, 2000)
     }
 
-    private fun handleSkilling(): Long {
-        println("Crafting staves")
-
-        var orbName: String = orbTypes[selectedOrb]
-        var orbId: Int = 591
-
-        when(selectedOrb){
-            0 -> { orbId = 591 }
-            1 -> { orbId = 569 }
-            2 -> { orbId = 575 }
-            3 -> { orbId = 573 }
-        }
-
-        if (!Backpack.contains(orbId)){
-            println("Cannot find $orbName in inventory")
-            botState = BotState.IDLE
-        }
-        println("Found $orbName")
-        if (usePortable) {
-            println("looking for portable")
-            val portable: SceneObject? =
-                SceneObjectQuery.newQuery().name("Portable crafter").option("Craft").results().nearest()
-            portable?.interact("Craft")
-            botState = BotState.PROCESSING
-            return random.nextLong(1500, 3000)
-        }
-
-
-        Backpack.interact("$orbName orb")
-        botState = BotState.PROCESSING
-
-        return random.nextLong(1500, 3000)
-    }
 }

@@ -20,7 +20,7 @@ tasks.withType<JavaCompile> {
 val copyJar by tasks.register<Copy>("copyJar") {
     from("build/libs/")
     into("${System.getProperty("user.home")}\\BotWithUs\\scripts\\local\\")
-    into("J:\\xfer\\")
+    //into("J:\\xfer\\")
     include("*.jar")
 }
 

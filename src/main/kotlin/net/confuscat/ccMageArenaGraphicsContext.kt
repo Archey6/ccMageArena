@@ -11,18 +11,12 @@ class ccMageArenaGraphicsContext(
 
     override fun drawSettings() {
         super.drawSettings()
-        ImGui.Begin("ccBattlestaves", 0)
-        ImGui.SetWindowSize(250f, 200f)
-        ImGui.Text("ccBattlestaves")
+        ImGui.Begin("ccMageArena", 0)
         ImGui.Text("Bot Sate: ${script.botState}")
         if (ImGui.Button("Start")) {
             script.botState = ccMageArena.BotState.STARTING;
             script.println("Starting...")
         }
-
-        script.bankPreset = ImGui.InputInt("Bank preset", script.bankPreset)
-        script.usePortable = ImGui.Checkbox("Use portable", script.usePortable)
-        script.selectedOrb = ImGui.Combo("Orb Type:", script.selectedOrb, *script.orbTypes)
         ImGui.End()
     }
 
